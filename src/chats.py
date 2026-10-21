@@ -35,8 +35,11 @@ _NUMBER = r"[0-9]+(?:[ .\u00a0][0-9]{3})*(?:[,.][0-9]+)?"
 _WORDS = _BASE_WORD + r"(?:\s+(?:" + _BASE_WORD + "|" + _SCALE + r"))*"
 _AMOUNT = re.compile(r"(?<!\w)(?:" + _NUMBER + "|" + _WORDS + r")\s*(?:₽|руб(?:лей|ля|ль)?\b|тыс\b|млн\b|[кk]\b|" + _SCALE + r"\b)(?:\s+руб(?:лей|ля|ль)\b)?")
 _PRICE_SCOPE = re.compile(r"\b(?:цен[ауы]|стоимост\w*|стоит|обойдется|итоговая|выйдет|это будет|для вас|за изделие|за модель|шуб\w*|полушуб\w*|жилет\w*|шапк\w*|палантин\w*)\b")
-_BARE_AMOUNT = re.compile(r"(?<![\w.,:/+\-])[0-9]{4,}(?![\w]|[.,:/-][0-9])")
-_AUXILIARY = re.compile(r"\b(?:доставк\w*|предоплат\w*|аванс\w*|рассроч\w*|платеж\w*|бюджет\w*|скидка|снятие мерок|стоимость примерки|цена примерки)\b")
+_BARE_AMOUNT = re.compile(r"(?<![\w.,:/+\-])(?:[0-9]{1,3}(?: [0-9]{3})+|[0-9]{4,})(?![\w]|[.,:/-][0-9])")
+_AUXILIARY = re.compile(r"\b(?:предоплат\w*|аванс\w*|рассроч\w*|платеж\w*|бюджет\w*|скидка|снятие мерок|стоимость примерки|цена примерки)\b")
+_DELIVERY = re.compile(r"\bдоставк\w*\b")
+_INCLUDED_DELIVERY = re.compile(r"\b(?:(?:с|включая|вместе с) доставк\w*|доставка (?:уже )?включена)\b")
+_DELIVERY_PRICE = re.compile(r"\b(?:(?:цена|стоимость) доставки|доставка\s+(?:стоит|обойдется|выйдет))\b")
 _QUESTION_OR_QUOTE = re.compile(r"(?:сколько|какой|какая|ваш бюджет|вы (?:говорили|видели|сказали)|у конкурентов|клиент (?:назвал|сказал))")
 _PRICE_NEGATION = re.compile(r"(?:не (?:могу|буду|готова?|назову)|не стоит|не [0-9]|цен\w* (?:пока )?не|назов\w* позже)")
 _VISIT = re.compile(r"\b(?:приезжайте|приходите|подъезжайте|заезжайте|заглядывайте|заходите)\b")
@@ -46,13 +49,38 @@ _INVITATION = [
     re.compile(r"(?:когда|сможете|можете|давайте|удобно).{0,70}(?:подъехать|приехать|заехать|зайти|встретиться|примерить)"),
     re.compile(r"\b(?:запишу|запишем|записать|записываю|забронирую)\b.{0,80}" + _PLACE),
     re.compile(r"\b(?:давайте|предлагаю)\b.{0,40}(?:встретимся|увидимся|подберем вживую|примерим)"),
-    re.compile(r"\b(?:ждем вас|жду вас|будем ждать вас)\b"),
+    re.compile(r"\b(?:ждем вас|жду вас|(?:буду|будем) ждать вас)\b"),
     re.compile(r"\bдавайте к нам\b"),
     re.compile(r"к нам.{0,30}(?:завтра|сегодня|в субботу|в воскресенье).{0,30}(?:удобно|сможете|\?)"),
 ]
-_INVITE_NEGATION = re.compile(r"(?:не (?:нужно|надо|стоит|приезжайте|приходите|приглашаю)|не приглашаем|визит отменен)")
+_INVITE_NEGATION = re.compile(r"(?:не (?:нужно|надо|стоит|приезжайте|приходите|приглашаю|приглашаем|жду|ждем|будем ждать|буду ждать)|визит отменен)")
+_NEGATIVE_PREFIX = re.compile(r"\bне\s+(?:(?:нужно|надо|стоит|могу|можем|буду|будем)\s+)?$")
+_NEGATIVE_VISIT_ACTION = re.compile(r"\bне\s+(?:приехать|приезжать|подъехать|заехать|зайти|встретиться|примерить)\b")
 _HINT = re.compile(r"(?:цен\w*|стоимост\w*|приглаш\w*|примерк\w*|встрет\w*|приех\w*|подъех\w*|шоурум)")
 _NEUTRAL = re.compile(r"(?:шоурум находится|работаем ежедневно|изделия шьем|мерки снимаем индивидуально)")
+
+
+def _auxiliary_cost(clause: str) -> bool:
+    """Отличить отдельную услугу от доставки, включённой в цену изделия."""
+    if _AUXILIARY.search(clause) or _DELIVERY_PRICE.search(clause):
+        return True
+    return bool(_DELIVERY.search(clause) and not _INCLUDED_DELIVERY.search(clause))
+
+
+def _has_invitation(clause: str) -> bool:
+    """Проверить отрицание у конкретного действия, сохранив другие приглашения.
+
+    В «не жду подтверждения и приглашаю» отрицание не относится к приглашению;
+    в «не жду вас» оно стоит непосредственно перед распознанным действием.
+    """
+    for rule in [_VISIT, *_INVITATION]:
+        for match in rule.finditer(clause):
+            if _NEGATIVE_PREFIX.search(clause[:match.start()]):
+                continue
+            if _NEGATIVE_VISIT_ACTION.search(match[0]):
+                continue
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -92,7 +120,7 @@ def classify_message(message: Message, previous: Message | None = None) -> Class
         standalone_amount = bool(re.fullmatch(r"\s*(?:(?:от|около|примерно|порядка|ориентировочно)\s+)?" + _AMOUNT.pattern + r"[ .,!]*", clause))
         amount_is_offer = has_amount and bool(_PRICE_SCOPE.search(clause) or prior_price_question or standalone_amount)
         bare_price = bool(_BARE_AMOUNT.search(clause)) and bool(_PRICE_SCOPE.search(clause) or prior_price_question)
-        auxiliary = bool(_AUXILIARY.search(clause))
+        auxiliary = _auxiliary_cost(clause)
         question = bool(_QUESTION_OR_QUOTE.search(clause))
         negated_price = bool(_PRICE_NEGATION.search(clause))
         if (amount_is_offer or bare_price) and not (auxiliary or question or negated_price):
@@ -102,14 +130,13 @@ def classify_message(message: Message, previous: Message | None = None) -> Class
             reviews.append("Сумма в вопросе, цитате или отрицании не принята за объявленную цену")
         elif has_amount and not auxiliary and not amount_is_offer:
             reviews.append("Денежная сумма без ясного утверждения цены изделия")
-        visit = bool(_VISIT.search(clause) or any(rule.search(clause) for rule in _INVITATION))
-        if visit and not _INVITE_NEGATION.search(clause):
+        if _has_invitation(clause):
             invitation = True
             reasons.append("Предложен физический визит или согласование записи, а не описание места")
     if price and invitation:
         reviews.append("Цена и приглашение в одном сообщении: строгий порядок сообщений не установлен")
     if not price and not invitation and _HINT.search(text) and not (
-        _NEUTRAL.search(text) or _INVITE_NEGATION.search(text) or _AUXILIARY.search(text)
+        _NEUTRAL.search(text) or _INVITE_NEGATION.search(text) or _auxiliary_cost(text)
     ):
         reviews.append("Есть смысловой сигнал цены/визита, но нет уверенно распознанного события")
     return Classification(price, invitation, tuple(dict.fromkeys(reasons)), tuple(dict.fromkeys(reviews)))

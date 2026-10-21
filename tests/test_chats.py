@@ -46,6 +46,78 @@ def test_not_a_product_price(text):
 
 
 @pytest.mark.parametrize("text", [
+    "Шуба стоит 250 000 рублей с доставкой",
+    "Стоимость жилета с доставкой — двести пятьдесят тысяч рублей",
+    "Цена 250 000", "Цена 250\u00a0000", "Стоимость модели 1 250 000",
+])
+def test_audit_product_price_with_delivery_or_grouped_amount(text):
+    result = classify_message(message(text))
+    assert result.is_price
+    assert not result.is_invitation
+
+
+@pytest.mark.parametrize("text", [
+    "Доставка стоит 2 000 рублей", "Стоимость доставки 2 000",
+    "Предоплата за шубу 30 000 рублей", "Стоимость примерки 1 000 рублей",
+])
+def test_audit_separate_service_is_not_product_price(text):
+    assert not classify_message(message(text)).is_price
+
+
+@pytest.mark.parametrize("text", [
+    "Не жду вас завтра, визит пока не согласован",
+    "Мы не ждём вас сегодня", "Не будем ждать вас завтра",
+    "Не приглашаю вас на примерку", "Можете не приезжать завтра",
+])
+def test_audit_negation_applies_to_invitation(text):
+    assert not classify_message(message(text)).is_invitation
+
+
+@pytest.mark.parametrize("text", [
+    "Не переживайте и приезжайте к нам завтра",
+    "Не жду подтверждения и приглашаю вас на примерку",
+    "Не жду вас завтра, но жду вас в пятницу",
+    "Не нужно торопиться с выбором, приезжайте на примерку",
+])
+def test_audit_unrelated_negation_does_not_cancel_invitation(text):
+    assert classify_message(message(text)).is_invitation
+
+
+@pytest.mark.parametrize("price", [
+    "Шуба стоит 250 000 рублей с доставкой", "Цена 250 000",
+    "Стоимость с доставкой — двести пятьдесят тысяч рублей",
+])
+@pytest.mark.parametrize("invite_first", [False, True])
+def test_audit_full_conversation_event_order(price, invite_first):
+    events = [message(price), message("Когда сможете подъехать?")]
+    if invite_first:
+        events.reverse()
+    result = analyze_chat(chat(message("Сколько стоит жилет?", "Клиент"),
+                               events[0], message("Понятно", "Клиент"), events[1]))
+    assert result.violation is invite_first
+    assert result.first_price.position == (4 if invite_first else 2)
+    assert result.first_invitation.position == (2 if invite_first else 4)
+
+
+def test_audit_negated_invitation_before_price_in_full_conversation():
+    result = analyze_chat(chat(
+        message("Не жду вас завтра, визит пока не согласован"),
+        message("А сколько стоит жилет?", "Клиент"),
+        message("Цена 250 000"), message("Приходите к нам в пятницу")))
+    assert not result.violation
+    assert result.first_price.position == 3
+    assert result.first_invitation.position == 4
+
+
+def test_audit_customer_price_does_not_hide_early_invitation():
+    result = analyze_chat(chat(message("Цена 250 000", "Клиент"),
+                               message("Приезжайте к нам"),
+                               message("Шуба стоит 250 000 рублей с доставкой")))
+    assert result.violation
+    assert result.first_price.position == 3
+
+
+@pytest.mark.parametrize("text", [
     "Приглашаю на примерку в ателье — когда вам удобно?",
     "Когда сможете подъехать на примерку?",
     "Давайте я запишу вас на встречу в шоурум. Завтра в 15:00 удобно?",
