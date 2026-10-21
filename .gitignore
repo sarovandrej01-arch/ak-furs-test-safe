@@ -32,3 +32,16 @@ Thumbs.db
 .idea/
 .vscode/
 data/
+# Исходники, конфиденциальные результаты и диагностические материалы
+answers*.json
+_probe*
+reports/
+diagnostics/
+**/diagnostics/
+docs/data_schema.md
+docs/q[1-5].md
+docs/final_audit.md
+*.csv
+*.xlsx
+*.xls
+*.zip
